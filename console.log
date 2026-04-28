@@ -1,0 +1,11 @@
+.on('postgres_changes', { event: 'INSERT', schema: 'public', table: 'blood_requests' }, 
+async (payload) => {
+  console.log("Data Baru Masuk:", payload.new);
+  console.log("Lokasi User Saat Ini:", currentLocation);
+  
+  if (payload.new.required_blood === userProfile.bloodType) {
+    console.log("Darah Cocok!");
+  } else {
+    console.log("Darah Tidak Cocok:", payload.new.required_blood, "vs", userProfile.bloodType);
+  }
+})
