@@ -1,9 +1,9 @@
-import { useState, useEffect, useRef } from 'react';
-import { getDistance } from 'geolib';
-import * as Location from 'expo-location';
-import { supabase } from '../supabase';
+import * as Location from "expo-location";
+import { getDistance } from "geolib";
+import { useCallback, useEffect, useRef, useState } from "react";
+import { Alert } from "react-native";
+import { supabase } from "../supabase";
 
-// --- Interfaces (Tetap Sama) ---
 export interface UserProfile {
   id: string;
   name: string;
@@ -22,34 +22,49 @@ export interface EmergencyAlert {
   bagsNeeded: number;
   bloodType: string;
   requestId: string;
+  urgencyLevel?: string;
 }
 
 interface BloodAgentResult {
   currentLocation: LocationCoords | null;
-  emergencyAlerts: EmergencyAlert[]; // Pakai Array
+  emergencyAlerts: EmergencyAlert[];
   setEmergencyAlerts: React.Dispatch<React.SetStateAction<EmergencyAlert[]>>;
   isAgentActive: boolean;
+  acceptBloodRequest: (
+    alert: EmergencyAlert,
+    notes?: string,
+  ) => Promise<boolean>;
+  declineBloodRequest: (alert: EmergencyAlert) => Promise<boolean>;
+  isLoading: boolean;
 }
 
 export const useBloodAgent = (userProfile: UserProfile): BloodAgentResult => {
-  const [currentLocation, setCurrentLocation] = useState<LocationCoords | null>(null);
+  const [currentLocation, setCurrentLocation] = useState<LocationCoords | null>(
+    null,
+  );
   const [emergencyAlerts, setEmergencyAlerts] = useState<EmergencyAlert[]>([]);
   const [isAgentActive, setIsAgentActive] = useState<boolean>(false);
+  const [isLoading, setIsLoading] = useState<boolean>(false);
 
   const locationRef = useRef<LocationCoords | null>(null);
+  const intervalRef = useRef<ReturnType<typeof setInterval> | null>(null);
 
-  // 1. Monitor Lokasi (GPS) - Tetap Aktif
+  // 1. Monitor Location GPS
   useEffect(() => {
     let locationSubscription: Location.LocationSubscription;
 
     const startTracking = async () => {
       const { status } = await Location.requestForegroundPermissionsAsync();
-      if (status !== 'granted') return;
+      if (status !== "granted") {
+        console.log("❌ Location permission denied");
+        return;
+      }
 
       locationSubscription = await Location.watchPositionAsync(
         {
           accuracy: Location.Accuracy.High,
           distanceInterval: 10,
+          timeInterval: 5000,
         },
         (location) => {
           const newCoords = {
@@ -59,65 +74,217 @@ export const useBloodAgent = (userProfile: UserProfile): BloodAgentResult => {
           setCurrentLocation(newCoords);
           locationRef.current = newCoords;
           setIsAgentActive(true);
-        }
+        },
       );
     };
 
     startTracking();
-    return () => { if (locationSubscription) locationSubscription.remove(); };
+
+    return () => {
+      if (locationSubscription) {
+        locationSubscription.remove();
+      }
+    };
   }, []);
 
-  // 2. Logic Fetching (Pengganti Realtime)
-  useEffect(() => {
-    const fetchBloodRequests = async () => {
-      const currentLoc = locationRef.current;
-      if (!currentLoc) return;
+  // 2. Accept Blood Request
+  const acceptBloodRequest = async (
+    alert: EmergencyAlert,
+    notes?: string,
+  ): Promise<boolean> => {
+    setIsLoading(true);
 
-      console.log("🔍 Agen Otonom: Memindai permintaan darah...");
+    try {
+      // Cek apakah sudah pernah merespon request ini
+      const { data: existing } = await supabase
+        .from("donor_responses")
+        .select("id, response_status")
+        .eq("request_id", alert.requestId)
+        .eq("donor_id", userProfile.id)
+        .single();
 
-      // Fetch permintaan yang statusnya 'Active' dan tipe darah cocok
-      const { data: requests, error } = await supabase
-        .rpc('get_active_blood_requests', { p_blood_type: userProfile.blood_type });
-      // Kemudian ganti hospital.location menjadi hospital.location_text
+      if (existing) {
+        if (existing.response_status === "accepted") {
+          Alert.alert(
+            "Info",
+            "Anda sudah menyetujui permintaan ini sebelumnya",
+          );
+          return false;
+        }
+        if (existing.response_status === "completed") {
+          Alert.alert("Info", "Permintaan ini sudah selesai");
+          return false;
+        }
+      }
+
+      // Insert or update response
+      const { error } = await supabase.from("donor_responses").upsert(
+        {
+          request_id: alert.requestId,
+          donor_id: userProfile.id,
+          response_status: "accepted",
+          notes: notes || null,
+          responded_at: new Date().toISOString(),
+        },
+        {
+          onConflict: "request_id,donor_id",
+        },
+      );
+
+      if (error) throw error;
+
+      // Hapus alert dari list
+      setEmergencyAlerts((prev) =>
+        prev.filter((a) => a.requestId !== alert.requestId),
+      );
+
+      Alert.alert(
+        "✅ Berhasil!",
+        `Anda telah menyetujui permintaan darah di ${alert.hospitalName}. Tim akan menghubungi Anda segera.`,
+      );
+
+      return true;
+    } catch (error: any) {
+      console.error("Error accepting request:", error);
+      Alert.alert("Error", "Gagal menyetujui permintaan. Silakan coba lagi.");
+      return false;
+    } finally {
+      setIsLoading(false);
+    }
+  };
+
+  // 3. Decline Blood Request
+  const declineBloodRequest = async (
+    alert: EmergencyAlert,
+  ): Promise<boolean> => {
+    setIsLoading(true);
+
+    try {
+      const { error } = await supabase.from("donor_responses").upsert(
+        {
+          request_id: alert.requestId,
+          donor_id: userProfile.id,
+          response_status: "declined",
+          responded_at: new Date().toISOString(),
+        },
+        {
+          onConflict: "request_id,donor_id",
+        },
+      );
+
+      if (error) throw error;
+
+      // Hapus alert dari list
+      setEmergencyAlerts((prev) =>
+        prev.filter((a) => a.requestId !== alert.requestId),
+      );
+
+      return true;
+    } catch (error: any) {
+      console.error("Error declining request:", error);
+      return false;
+    } finally {
+      setIsLoading(false);
+    }
+  };
+
+  // 4. Fetch Blood Requests
+  const fetchBloodRequests = useCallback(async () => {
+    if (!locationRef.current || !userProfile.is_available) {
+      return;
+    }
+
+    try {
+      // Call RPC function
+      const { data: requests, error } = await supabase.rpc(
+        "get_active_blood_requests",
+        {
+          p_blood_type: userProfile.blood_type,
+        },
+      );
+
       if (error) {
-        console.error("❌ Fetch Error:", error.message);
+        console.error("RPC Error:", error.message);
         return;
       }
 
-      if (requests && requests.length > 0) {
-        const foundAlerts: EmergencyAlert[] = []; // Penampung sementara
-        // Tambahkan log jarak di sini
-        for (const req of requests) {
-          console.log("Isi data dari DB:", req);
-          const hospitalLocation = {
-            latitude: req.lat,
-            longitude: req.lng
-          };
-          const distMeters = getDistance(currentLoc, hospitalLocation);
-          if (distMeters <= 5000) {
-            foundAlerts.push({
-              hospitalName: req.hospital_name,
-              distance: (distMeters / 1000).toFixed(1),
-              bagsNeeded: req.bags,
-              bloodType: req.blood_type,
-              requestId: req.request_id
-            });
-          }
+      if (!requests || requests.length === 0) {
+        setEmergencyAlerts([]);
+        return;
+      }
 
+      // Get already responded requests
+      const { data: responded } = await supabase
+        .from("donor_responses")
+        .select("request_id")
+        .eq("donor_id", userProfile.id)
+        .in("response_status", ["accepted", "declined", "completed"]);
 
+      const respondedIds = new Set(responded?.map((r) => r.request_id) || []);
+
+      const currentLoc = locationRef.current;
+      const foundAlerts: EmergencyAlert[] = [];
+
+      for (const req of requests) {
+        // Skip if already responded
+        if (respondedIds.has(req.request_id)) continue;
+
+        if (!req.lat || !req.lng) continue;
+
+        const hospitalLocation = {
+          latitude: req.lat,
+          longitude: req.lng,
+        };
+
+        const distanceMeters = getDistance(currentLoc, hospitalLocation);
+        const distanceKm = distanceMeters / 1000;
+
+        if (distanceMeters <= 5000) {
+          foundAlerts.push({
+            hospitalName: req.hospital_name,
+            distance: distanceKm.toFixed(1),
+            bagsNeeded: req.bags,
+            bloodType: req.blood_type,
+            requestId: req.request_id,
+            urgencyLevel: req.urgency_level,
+          });
         }
-        setEmergencyAlerts(foundAlerts); // Update semua sekaligus
+      }
+
+      setEmergencyAlerts(foundAlerts);
+    } catch (error: any) {
+      console.error("Unexpected error:", error?.message || error);
+    }
+  }, [userProfile.blood_type, userProfile.is_available, userProfile.id]);
+
+  // 5. Setup polling interval
+  useEffect(() => {
+    if (locationRef.current && userProfile.is_available) {
+      setTimeout(() => {
+        fetchBloodRequests();
+      }, 1000);
+    }
+
+    intervalRef.current = setInterval(() => {
+      if (locationRef.current && userProfile.is_available) {
+        fetchBloodRequests();
+      }
+    }, 30000);
+
+    return () => {
+      if (intervalRef.current) {
+        clearInterval(intervalRef.current);
       }
     };
+  }, [fetchBloodRequests, userProfile.is_available]);
 
-    // Jalankan fetch pertama kali
-    fetchBloodRequests();
-
-    // Set interval untuk polling setiap 30 detik
-    const intervalId = setInterval(fetchBloodRequests, 30000);
-
-    return () => clearInterval(intervalId);
-  }, [userProfile.blood_type, isAgentActive]); // Trigger ulang jika profile berubah
-
-  return { currentLocation, emergencyAlerts, setEmergencyAlerts, isAgentActive };
+  return {
+    currentLocation,
+    emergencyAlerts,
+    setEmergencyAlerts,
+    isAgentActive,
+    acceptBloodRequest,
+    declineBloodRequest,
+    isLoading,
+  };
 };
