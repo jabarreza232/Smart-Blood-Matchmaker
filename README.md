@@ -150,11 +150,11 @@ SmartBloodMatchMaker adalah platform mobile yang memfasilitasi proses donasi dar
    ```
    
    Update file `.env.local`:
-   ```
+   ```bash
 REACT_APP_SUPABASE_URL=[url]
 REACT_APP_SUPABASE_PUBLISHABLE_KEY=[published_key]
-
 DATABASE_URL = postgresql://postgres.jggwwcxutxzbanqkujwk:[Password]@aws-1-ap-northeast-2.pooler.supabase.com:6543/postgres   
+
 ```
 
 4. **Start development server**
